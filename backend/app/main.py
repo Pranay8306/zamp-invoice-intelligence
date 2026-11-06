@@ -49,12 +49,13 @@ def initialize_reference_data():
 
         if not vendor:
             vendor = Vendor(
-                name="ABC Technologies Pvt. Ltd.",
+                legal_name="ABC Technologies Pvt. Ltd.",
                 aliases="ABC TECHNOLOGIES PVT. LTD.;ABC Technologies",
                 gstin="36AABCA1234F1Z5",
                 approved=True
             )
             db.add(vendor)
+            db.flush()
 
         po1 = db.query(PurchaseOrder).filter(
             PurchaseOrder.po_number == "PO-5021"
@@ -64,8 +65,8 @@ def initialize_reference_data():
             db.add(
                 PurchaseOrder(
                     po_number="PO-5021",
-                    vendor_name="ABC Technologies Pvt. Ltd.",
-                    amount=200000,
+                    vendor_id=vendor.id,
+                    total_amount=200000,
                     tolerance_percent=3,
                     currency="INR",
                     invoiced_amount=0
@@ -80,8 +81,8 @@ def initialize_reference_data():
             db.add(
                 PurchaseOrder(
                     po_number="PO-5022",
-                    vendor_name="ABC Technologies Pvt. Ltd.",
-                    amount=100000,
+                    vendor_id=vendor.id,
+                    total_amount=100000,
                     tolerance_percent=3,
                     currency="INR",
                     invoiced_amount=0
@@ -89,6 +90,10 @@ def initialize_reference_data():
             )
 
         db.commit()
+
+    except Exception:
+        db.rollback()
+        raise
 
     finally:
         db.close()
@@ -114,7 +119,7 @@ async def upload_invoice(file: UploadFile = File(...)):
     try:
         processing_trace = []
 
-        if not file.filename.lower().endswith(".pdf"):
+        if not file.filename or not file.filename.lower().endswith(".pdf"):
             raise HTTPException(
                 status_code=400,
                 detail="Only PDF files are supported."
@@ -224,7 +229,6 @@ async def upload_invoice(file: UploadFile = File(...)):
         })
 
         invoice_data = extract_invoice_data(extracted_text)
-
         invoice_data.extraction_warnings.extend(warnings)
 
         found_fields = [
@@ -258,13 +262,18 @@ async def upload_invoice(file: UploadFile = File(...)):
         })
 
         invoice_record = Invoice(
-            file_name=file.filename,
-            vendor_name=invoice_data.vendor_name,
+            invoice_id=str(uuid.uuid4()),
             invoice_number=invoice_data.invoice_number,
+            vendor_name=invoice_data.vendor_name,
             po_reference=invoice_data.po_reference,
+            invoice_date=invoice_data.invoice_date,
+            currency=invoice_data.currency,
+            subtotal=invoice_data.subtotal,
+            tax=invoice_data.tax,
             total=invoice_data.total,
             status=decision["status"],
-            decision_reasons="; ".join(decision["reasons"])
+            decision_reason="; ".join(decision["reasons"]),
+            file_name=file.filename
         )
 
         db.add(invoice_record)
@@ -278,7 +287,7 @@ async def upload_invoice(file: UploadFile = File(...)):
         })
 
         return {
-            "invoice_id": invoice_record.id,
+            "invoice_id": invoice_record.invoice_id,
             "original_filename": file.filename,
             "pages": page_count,
             "extraction_method": method,
@@ -304,7 +313,7 @@ def get_invoices():
 
         return [
             {
-                "invoice_id": invoice.id,
+                "invoice_id": invoice.invoice_id,
                 "file_name": invoice.file_name,
                 "vendor_name": invoice.vendor_name,
                 "invoice_number": invoice.invoice_number,
@@ -327,14 +336,17 @@ def get_dashboard():
         invoices = db.query(Invoice).all()
 
         total = len(invoices)
+
         approved = sum(
             1 for invoice in invoices
             if invoice.status == "APPROVED"
         )
+
         rejected = sum(
             1 for invoice in invoices
             if invoice.status == "REJECTED"
         )
+
         manual_review = sum(
             1 for invoice in invoices
             if invoice.status == "MANUAL_REVIEW"
