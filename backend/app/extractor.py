@@ -5,124 +5,221 @@ from datetime import datetime
 from app.schemas import InvoiceData, LineItem
 
 
+def clean_text(text):
+    text = text.replace("\xa0", " ")
+    text = text.replace("₹", " INR ")
+    return re.sub(r"[ \t]+", " ", text)
 
-def extract_amount(text, label):
-    pattern = rf"(?im)^\s*(?:{label})\s*:?\s*\n?\s*(?:INR|₹)?\s*([\d,]+\.\d{{2}})"
+
+def find_field(text, labels, value_pattern):
+    label_pattern = "|".join(labels)
+    pattern = (
+        rf"(?im)^\s*(?:{label_pattern})\s*[:#-]?\s*"
+        rf"(?:\n\s*)?({value_pattern})"
+    )
+    match = re.search(pattern, text)
+    return match.group(1).strip() if match else None
+
+
+def parse_amount(value):
+    if not value:
+        return None
+
+    value = value.replace(",", "").strip()
+    match = re.search(r"-?\d+(?:\.\d{1,2})?", value)
+
+    if not match:
+        return None
+
+    try:
+        return float(match.group())
+    except ValueError:
+        return None
+
+
+def extract_amount(text, labels):
+    if isinstance(labels, str):
+        labels = [labels]
+
+    label_pattern = "|".join(labels)
+
+    pattern = (
+        rf"(?im)^\s*(?:{label_pattern})\s*[:\-]?\s*"
+        rf"(?:INR|USD|EUR|GBP|Rs\.?|₹|\$|€|£)?\s*"
+        rf"([-+]?\d[\d,]*(?:\.\d{{1,2}})?)"
+    )
 
     match = re.search(pattern, text)
 
     if match:
-        return float(match.group(1).replace(",", ""))
+        return parse_amount(match.group(1))
+
+    pattern = (
+        rf"(?im)^\s*(?:{label_pattern})\s*[:\-]?\s*$"
+        rf"\s*(?:INR|USD|EUR|GBP|Rs\.?|₹|\$|€|£)?\s*"
+        rf"([-+]?\d[\d,]*(?:\.\d{{1,2}})?)"
+    )
+
+    match = re.search(pattern, text)
+
+    if match:
+        return parse_amount(match.group(1))
 
     return None
 
 
-def extract_invoice_data(text):
-
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-
-    vendor_name = lines[0] if lines else None
-
-    invoice_number = None
-    invoice_date = None
-    po_reference = None
-
-    
-    number_match = re.search(
-        r"(?im)^\s*Invoice\s*Number\s*:?\s*(?:\n\s*)?([A-Z0-9][A-Z0-9/-]*)\s*$",
-        text
-    )
-
-    if number_match:
-        invoice_number = number_match.group(1).strip()
-
-
-    date_match = re.search(
-        r"Invoice\s*Date\s*:?\s*\n?\s*(\d{1,2}[-/][A-Za-z0-9]+[-/]\d{4})",
+def extract_date(text):
+    raw_date = find_field(
         text,
-        re.IGNORECASE
+        [r"Invoice\s*Date", r"Bill\s*Date", r"Date\s*of\s*Issue"],
+        r"\d{1,2}[-/. ](?:\d{1,2}|[A-Za-z]{3,9})[-/. ]\d{2,4}"
     )
 
-    if date_match:
-        raw_date = date_match.group(1)
+    if not raw_date:
+        return None
 
-        for date_format in (
-            "%d-%b-%Y",
-            "%d/%b/%Y",
-            "%d-%m-%Y",
-            "%d/%m/%Y"
-        ):
-            try:
-                invoice_date = datetime.strptime(
-                    raw_date, date_format
-                ).date().isoformat()
+    formats = [
+        "%d-%b-%Y", "%d/%b/%Y",
+        "%d-%B-%Y", "%d/%B/%Y",
+        "%d-%m-%Y", "%d/%m/%Y",
+        "%d.%m.%Y", "%d-%m-%y",
+        "%d/%m/%y", "%Y-%m-%d",
+        "%Y/%m/%d"
+    ]
+
+    for fmt in formats:
+        try:
+            return datetime.strptime(raw_date, fmt).date().isoformat()
+        except ValueError:
+            continue
+
+    return raw_date
+
+
+def extract_line_items(lines):
+    items = []
+
+    for i, line in enumerate(lines):
+        if not re.search(r"description|particulars|item", line, re.I):
+            continue
+
+        if not re.search(r"quantity|qty", line, re.I):
+            continue
+
+        if not re.search(r"amount|total", line, re.I):
+            continue
+
+        for row in lines[i + 1:]:
+            if re.match(
+                r"(?i)^\s*(subtotal|tax|gst|grand total|invoice total)",
+                row
+            ):
                 break
-            except ValueError:
+
+            values = re.findall(r"-?\d[\d,]*(?:\.\d{1,2})?", row)
+
+            if len(values) < 3:
                 continue
 
-        if invoice_date is None:
-            invoice_date = raw_date
+            try:
+                amount = parse_amount(values[-1])
+                unit_price = parse_amount(values[-2])
+                quantity = parse_amount(values[-3])
 
-    po_match = re.search(
-        r"Purchase\s*Order\s*:?\s*\n?\s*([A-Z0-9/-]+)",
-        text,
-        re.IGNORECASE
+                description = row
+                for value in values[-3:]:
+                    description = description.replace(value, "", 1)
+
+                description = description.strip(" |:-")
+
+                if amount is not None and quantity is not None:
+                    items.append(
+                        LineItem(
+                            description=description or "Invoice item",
+                            quantity=quantity,
+                            unit_price=unit_price or 0,
+                            amount=amount
+                        )
+                    )
+            except (ValueError, TypeError):
+                continue
+
+        if items:
+            break
+
+    return items
+
+
+def extract_invoice_data(text):
+    text = clean_text(text)
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+
+    vendor_name = None
+
+    ignored = re.compile(
+        r"(?i)^(tax invoice|invoice|bill|original|duplicate|copy)$"
     )
 
-    if po_match:
-        po_reference = po_match.group(1).strip()
+    for line in lines[:10]:
+        if not ignored.match(line) and not re.search(
+            r"invoice\s*(number|no|#|date)", line, re.I
+        ):
+            vendor_name = line
+            break
 
-    subtotal = extract_amount(text, "Subtotal")
-    tax = extract_amount(text, "GST|Tax")
-    total = extract_amount(text, "TOTAL")
+    invoice_number = find_field(
+        text,
+        [
+            r"Invoice\s*(?:Number|No\.?|#)",
+            r"Bill\s*(?:Number|No\.?|#)",
+            r"Document\s*(?:Number|No\.?)"
+        ],
+        r"[A-Z0-9][A-Z0-9/-]*"
+    )
 
-    currency = "INR" if re.search(r"\bINR\b|₹", text) else "UNKNOWN"
+    invoice_date = extract_date(text)
 
-    line_items = []
+    po_reference = find_field(
+        text,
+        [
+            r"Purchase\s*Order(?:\s*(?:Number|No\.?|#))?",
+            r"PO\s*(?:Reference|Number|No\.?|#)",
+            r"Order\s*Reference",
+            r"Order\s*Ref"
+        ],
+        r"[A-Z0-9][A-Z0-9/-]*"
+    )
 
-    try:
-        start = next(
-            i for i, line in enumerate(lines)
-            if line.lower() == "description"
-        )
+    subtotal = extract_amount(text, [r"Sub\s*Total", r"Subtotal"])
+    tax = extract_amount(text, [r"GST(?:\s*Amount)?", r"Tax(?:\s*Amount)?", r"VAT"])
+    total = extract_amount(
+        text,
+        [
+            r"Grand\s*Total",
+            r"Invoice\s*Total",
+            r"Total\s*Due",
+            r"Amount\s*Payable",
+            r"Net\s*Payable",
+            r"Total"
+        ]
+    )
 
-        end = next(
-            i for i in range(start + 1, len(lines))
-            if lines[i].lower() == "subtotal"
-        )
+    currency = "UNKNOWN"
 
-        item_lines = lines[start + 4:end]
+    currency_patterns = [
+        (r"\bINR\b|₹|\bRs\.?", "INR"),
+        (r"\bUSD\b|\$", "USD"),
+        (r"\bEUR\b|€", "EUR"),
+        (r"\bGBP\b|£", "GBP"),
+        (r"\bJPY\b|¥", "JPY")
+    ]
 
-        i = 0
+    for pattern, code in currency_patterns:
+        if re.search(pattern, text, re.I):
+            currency = code
+            break
 
-        while i + 3 < len(item_lines):
-
-            description = item_lines[i]
-            quantity_text = item_lines[i + 1]
-            unit_price_text = item_lines[i + 2]
-            amount_text = item_lines[i + 3]
-
-            try:
-                quantity = float(quantity_text.replace(",", ""))
-                unit_price = float(unit_price_text.replace(",", ""))
-                amount = float(amount_text.replace(",", ""))
-
-                line_items.append(
-                    LineItem(
-                        description=description,
-                        quantity=quantity,
-                        unit_price=unit_price,
-                        amount=amount
-                    )
-                )
-
-                i += 4
-
-            except ValueError:
-                i += 1
-
-    except StopIteration:
-        pass
+    line_items = extract_line_items(lines)
 
     missing_fields = []
 
