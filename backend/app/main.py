@@ -1,5 +1,4 @@
 
-
 import os
 import uuid
 from pathlib import Path
@@ -10,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.extractor import extract_invoice_data
 from app.database import Base, engine, SessionLocal
-from app.models import Invoice
+from app.models import Invoice, Vendor, PurchaseOrder
 from app.reconciliation import evaluate_invoice
 
 app = FastAPI(
@@ -18,7 +17,6 @@ app = FastAPI(
     description="Invoice Processing and Reconciliation System",
     version="1.0.0"
 )
-
 
 app.add_middleware(
     CORSMiddleware,
@@ -30,7 +28,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"]
 )
-
 
 Base.metadata.create_all(bind=engine)
 
@@ -161,14 +158,11 @@ async def upload_invoice(file: UploadFile = File(...)):
 
         invoice_data = extract_invoice_data(extracted_text)
 
-        # Include PDF extraction warnings in the decision process.
         if warnings:
             invoice_data.extraction_warnings.extend(warnings)
 
-        # Run business reconciliation.
         decision = evaluate_invoice(db, invoice_data)
 
-        # Persist the invoice and its decision.
         invoice_record = Invoice(
             invoice_id=invoice_id,
             invoice_number=invoice_data.invoice_number,
@@ -268,6 +262,42 @@ def get_dashboard():
             "approval_rate": round(
                 approved / total * 100, 2
             ) if total else 0
+        }
+
+    finally:
+        db.close()
+
+
+@app.get("/api/debug/database")
+def debug_database():
+
+    db = SessionLocal()
+
+    try:
+        vendors = db.query(Vendor).all()
+        purchase_orders = db.query(PurchaseOrder).all()
+
+        return {
+            "vendor_count": len(vendors),
+            "vendors": [
+                {
+                    "id": vendor.id,
+                    "name": vendor.legal_name,
+                    "aliases": vendor.aliases,
+                    "approved": vendor.approved
+                }
+                for vendor in vendors
+            ],
+            "purchase_order_count": len(purchase_orders),
+            "purchase_orders": [
+                {
+                    "po_number": po.po_number,
+                    "vendor_id": po.vendor_id,
+                    "total_amount": po.total_amount,
+                    "invoiced_amount": po.invoiced_amount
+                }
+                for po in purchase_orders
+            ]
         }
 
     finally:
