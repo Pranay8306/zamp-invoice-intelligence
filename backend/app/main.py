@@ -31,6 +31,68 @@ app.add_middleware(
 
 Base.metadata.create_all(bind=engine)
 
+# Ensure reference vendor and purchase orders exist
+def initialize_reference_data():
+    db = SessionLocal()
+
+    try:
+        vendor = db.query(Vendor).filter(
+            Vendor.gstin == "36AABCA1234F1Z5"
+        ).first()
+
+        if not vendor:
+            vendor = Vendor(
+                legal_name="ABC Technologies Pvt. Ltd.",
+                aliases="ABC TECHNOLOGIES PVT. LTD.;ABC Technologies",
+                gstin="36AABCA1234F1Z5",
+                approved=True
+            )
+            db.add(vendor)
+            db.commit()
+            db.refresh(vendor)
+
+        purchase_orders = [
+            {
+                "po_number": "PO-5021",
+                "total_amount": 200000.0
+            },
+            {
+                "po_number": "PO-5022",
+                "total_amount": 100000.0
+            }
+        ]
+
+        for item in purchase_orders:
+            existing = db.query(PurchaseOrder).filter(
+                PurchaseOrder.po_number == item["po_number"]
+            ).first()
+
+            if not existing:
+                db.add(
+                    PurchaseOrder(
+                        po_number=item["po_number"],
+                        vendor_id=vendor.id,
+                        total_amount=item["total_amount"],
+                        invoiced_amount=0.0,
+                        currency="INR",
+                        tolerance_percent=3.0
+                    )
+                )
+
+        db.commit()
+        print("Reference data initialized successfully.")
+
+    except Exception as error:
+        db.rollback()
+        print("Reference data initialization failed:", error)
+        raise
+
+    finally:
+        db.close()
+
+
+initialize_reference_data()
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 UPLOAD_DIR = BASE_DIR / "uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
