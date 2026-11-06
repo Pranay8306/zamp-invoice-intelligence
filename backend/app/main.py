@@ -329,38 +329,3 @@ def get_dashboard():
     finally:
         db.close()
 
-
-@app.get("/api/debug/database")
-def debug_database():
-
-    db = SessionLocal()
-
-    try:
-        vendors = db.query(Vendor).all()
-        purchase_orders = db.query(PurchaseOrder).all()
-
-        return {
-            "vendor_count": len(vendors),
-            "vendors": [
-                {
-                    "id": vendor.id,
-                    "name": vendor.legal_name,
-                    "aliases": vendor.aliases,
-                    "approved": vendor.approved
-                }
-                for vendor in vendors
-            ],
-            "purchase_order_count": len(purchase_orders),
-            "purchase_orders": [
-                {
-                    "po_number": po.po_number,
-                    "vendor_id": po.vendor_id,
-                    "total_amount": po.total_amount,
-                    "invoiced_amount": po.invoiced_amount
-                }
-                for po in purchase_orders
-            ]
-        }
-
-    finally:
-        db.close()
